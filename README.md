@@ -1,19 +1,67 @@
-# Campus Notes: security review project
+# Campus Notes: security review project (repaired)
 
-This application is intentionally vulnerable educational material. Run it only on an isolated machine you control, with synthetic data and a disposable local database. Never expose it to the internet, deploy it, or connect it to shared or real accounts. The companion laboratory handout defines the assignment.
+This started as intentionally vulnerable educational material. It has been repaired for the IPT security code review lab, but it is still a teaching app: run it only on an isolated machine you control, with synthetic data and a disposable local database. Never expose it to the internet or connect it to real accounts.
+
+## Project layout
+
+```
+Insecure-PHP-Notes-Lab/
+├── public/               <- web root (the only folder the server exposes)
+│   ├── index.php         <- web app controller (forms, PRG redirects)
+│   ├── api.php           <- JSON API (GET list, POST update)
+│   └── style.css         <- moved out of the page so the CSP can forbid inline styles
+├── src/                  <- not web-reachable
+│   ├── bootstrap.php     <- error handling, security headers, loads everything
+│   ├── config.php        <- reads settings from environment variables
+│   ├── db.php            <- PDO connection (real prepared statements)
+│   ├── session.php       <- hardened session start, login, logout, flash messages
+│   ├── csrf.php          <- CSRF token create/verify
+│   ├── validation.php    <- input helpers and note/registration validation
+│   ├── view.php          <- e() escaping, render(), redirect()
+│   ├── UserRepository.php
+│   └── NoteRepository.php <- every note query is scoped to the owner
+├── templates/home.php    <- HTML only, all output escaped
+├── tools/set_password.php <- CLI tool to reset a synthetic account to bcrypt
+├── schema.sql
+└── README.md
+```
+
+No Composer packages are used.
 
 ## Local setup
 
-1. Install a supported PHP 8 release with `pdo_mysql` and a local MySQL server. Confirm `pdo_mysql` appears in `php -m`.
-2. As a local MySQL administrator, import `schema.sql` into a fresh disposable server/database. It creates `notes_lab` and its tables; use a fresh database to avoid conflicts. Review the SQL before running it.
-3. Create a dedicated local MySQL account with SELECT, INSERT, UPDATE, and DELETE privileges only on `notes_lab`; do not use a production account. Set `LAB_DB_USER` and `LAB_DB_PASSWORD` for your shell. In PowerShell use `$env:LAB_DB_USER = 'your_local_user'` and `$env:LAB_DB_PASSWORD = 'your_local_password'`. Do not commit credentials.
-4. From this folder, run `php -S 127.0.0.1:8000`. Visit `http://127.0.0.1:8000`. The PHP built-in server is for local development only. Stop it with Ctrl+C after use.
-5. The schema includes two synthetic accounts and notes:
+1. Install PHP 8.1+ with `pdo_mysql` and a local MySQL 8 server. Confirm `pdo_mysql` appears in `php -m`.
+2. As a local MySQL administrator, import `schema.sql` into a fresh disposable server. It creates `notes_lab`; the seed accounts now use bcrypt hashes. If you already imported the **old** schema, either drop and re-create `notes_lab`, or reset each account with `php tools/set_password.php alex@example.test` (old MD5 hashes will not work with `password_verify()`).
+3. Create a least-privilege account, for example:
+   ```sql
+   CREATE USER 'notes_app'@'localhost' IDENTIFIED BY 'choose-a-local-password';
+   GRANT SELECT, INSERT, UPDATE, DELETE ON notes_lab.* TO 'notes_app'@'localhost';
+   ```
+   Then set the variables in the same shell you start PHP from. PowerShell:
+   ```powershell
+   $env:LAB_DB_USER = 'notes_app'
+   $env:LAB_DB_PASSWORD = 'choose-a-local-password'
+   ```
+   The app refuses to start without them (there is no `root`/empty-password fallback). Optional: `LAB_DB_HOST`, `LAB_DB_PORT`, `LAB_DB_NAME`, `LAB_ALLOWED_ORIGINS` (comma-separated, default `http://127.0.0.1:8000,http://localhost:8000`). Never commit credentials.
+4. From this folder run:
+   ```
+   php -S 127.0.0.1:8000 -t public
+   ```
+   and visit http://127.0.0.1:8000. Stop with Ctrl+C.
+5. Synthetic accounts (public throwaway passwords, lab only):
    - `alex@example.test` / `LabOnly-Alex-123`
    - `sam@example.test` / `LabOnly-Sam-456`
 
-   These public, throwaway credentials are for the isolated starter application only; never reuse them elsewhere. Use separate browser profiles for separate sessions. The starter stores these passwords using MD5, which students must replace. When switching to secure password hashing, recreate or reset the synthetic accounts and document the new test setup; existing MD5 hashes will not automatically work with `password_verify()`.
+   Use separate browser profiles for separate sessions. New registrations need a 12-72 byte password and always get the `student` role.
 
-The local HTTP setup is for the exercise only. A production deployment requires HTTPS, secure cookies, protected secrets, proper error handling, and additional security controls. Students should document their own fixes and limitations.
+## API
 
-The starter includes `api.php`: GET `/api.php?user_id=1` lists notes for an owner, and POST `/api.php` accepts a JSON object with `id`, `title`, and `body` to update a note. These endpoints intentionally lack important protections; use only synthetic data in the isolated lab. Review their behavior and repair them as part of the assignment.
+Both endpoints need a signed-in session cookie and only return or change the signed-in user's notes.
+
+- `GET /api.php` lists your notes. `?user_id=` is optional; any value other than your own ID returns 403.
+- `POST /api.php` with `Content-Type: application/json`, header `X-CSRF-Token: <token>` (the token is in the page's `<meta name="csrf-token">`), and a body like `{"id": 1, "title": "...", "body": "..."}`. Returns 404 for notes that are missing or not yours, 400 for malformed JSON or bad fields.
+- Requests with an `Origin` not in `LAB_ALLOWED_ORIGINS` get 403. No CORS headers are sent.
+
+## Production notes
+
+Local HTTP is for the exercise only. Production needs HTTPS (the session cookie automatically becomes `Secure` over HTTPS), HSTS, secrets from a secret store, central logging, login rate limiting, and a real web server instead of `php -S`.
